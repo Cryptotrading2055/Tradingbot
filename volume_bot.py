@@ -22,20 +22,30 @@ def send_telegram_message(message):
         "chat_id": CHAT_ID,
         "text": message
     }
-    requests.post(BASE_URL, json=payload, headers=HEADERS)
+    try:
+        requests.post(BASE_URL, json=payload, headers=HEADERS)
+    except:
+        pass
 
 def get_futures_symbols():
-    url = "https://api.bybit.com/v5/market/instruments-info?category=linear"
-    data = requests.get(url).json()
-    return [s['symbol'] for s in data['result']['list'] if s['symbol'].endswith("USDT")]
+    try:
+        url = "https://api.bybit.com/v5/market/instruments-info?category=linear"
+        response = requests.get(url)
+        data = response.json()
+        return [s['symbol'] for s in data['result']['list'] if s['symbol'].endswith("USDT")]
+    except:
+        return []
 
 def get_klines(symbol, interval="60", limit=100):
-    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
-    r = requests.get(url)
-    data = r.json()
-    if 'result' not in data or 'list' not in data['result']:
+    try:
+        url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
+        response = requests.get(url)
+        data = response.json()
+        if 'result' not in data or 'list' not in data['result']:
+            return []
+        return [[float(x[4]), float(x[1]), float(x[2])] for x in data['result']['list']]  # [close, open, high]
+    except:
         return []
-    return [[float(x[4]), float(x[1]), float(x[2])] for x in data['result']['list']]  # [close, open, high]
 
 def calculate_ema(data, period):
     ema = []
@@ -81,7 +91,7 @@ def ema_bot():
                     if low <= last_ema100 <= high:
                         send_telegram_message(f"📉 {symbol} dotknął EMA100 ({interval_label})\nEMA100: {round(last_ema100, 4)}")
 
-            time.sleep(300)  # Odświeżanie co 5 min
+            time.sleep(300)
 
         except Exception as e:
             send_telegram_message(f"❌ Błąd EMA bota: {str(e)}")
