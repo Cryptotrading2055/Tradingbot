@@ -41,9 +41,10 @@ def get_klines(symbol, interval="60", limit=100):
         url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
         response = requests.get(url)
         data = response.json()
-        if 'result' not in data or 'list' not in data['result']:
+        if response.status_code != 200 or 'result' not in data or 'list' not in data['result']:
             return []
-        return [[float(x[4]), float(x[1]), float(x[2])] for x in data['result']['list']]  # [close, open, high]
+        # Bybit kline fields: [timestamp, open, high, low, close, volume, ...]
+        return [[float(x[4]), float(x[3]), float(x[2])] for x in data['result']['list']]  # [close, low, high]
     except:
         return []
 
@@ -51,17 +52,34 @@ def calculate_ema(data, period):
     ema = []
     k = 2 / (period + 1)
     for i in range(len(data)):
-        if i < period - 1:
+        if data[i] is None:
+            ema.append(None)
+        elif i < period - 1:
             ema.append(None)
         elif i == period - 1:
             sma = sum(data[:period]) / period
             ema.append(sma)
         else:
-            ema.append((data[i] - ema[i-1]) * k + ema[i-1])
+            prev = ema[i-1]
+            ema.append((data[i] - prev) * k + prev)
     return ema
 
+# Added SMA smoothing for EMA (smoothing_length = 9)
+def calculate_sma(data, period):
+    sma = []
+    for i in range(len(data)):
+        if i < period - 1 or data[i] is None:
+            sma.append(None)
+        else:
+            window = [v for v in data[i-period+1:i+1] if v is not None]
+            if len(window) < period:
+                sma.append(None)
+            else:
+                sma.append(sum(window) / period)
+    return sma
+
 def ema_bot():
-    send_telegram_message("✅ Bot EMA działa na Render! Monitoruję EMA50 i EMA100 na 1H i 4H...")
+    send_telegram_message("✅ Bot EMA działa na Render! Monitoruję EMA50 i EMA100 (z SMA9) na 1H i 4H...")
 
     while True:
         try:
@@ -73,23 +91,26 @@ def ema_bot():
                         continue
 
                     closes = [k[0] for k in klines]
-                    high = klines[-1][2]
                     low = klines[-1][1]
+                    high = klines[-1][2]
 
-                    ema50 = calculate_ema(closes, 50)
-                    ema100 = calculate_ema(closes, 100)
+                    # raw EMA
+                    ema50_raw = calculate_ema(closes, 50)
+                    ema100_raw = calculate_ema(closes, 100)
+                    # SMA smoothing line length 9
+                    ema50 = calculate_sma(ema50_raw, 9)
+                    ema100 = calculate_sma(ema100_raw, 9)
 
-                    if ema50[-1] is None or ema100[-1] is None:
-                        continue
-
+                    # last values
                     last_ema50 = ema50[-1]
                     last_ema100 = ema100[-1]
 
-                    if low <= last_ema50 <= high:
-                        send_telegram_message(f"📉 {symbol} dotknął EMA50 ({interval_label})\nEMA50: {round(last_ema50, 4)}")
+                    # check only if values exist
+                    if last_ema50 is not None and low <= last_ema50 <= high:
+                        send_telegram_message(f"📉 {symbol} dotknął EMA50 (z SMA9) ({interval_label})\nEMA50: {round(last_ema50, 4)}")
 
-                    if low <= last_ema100 <= high:
-                        send_telegram_message(f"📉 {symbol} dotknął EMA100 ({interval_label})\nEMA100: {round(last_ema100, 4)}")
+                    if last_ema100 is not None and low <= last_ema100 <= high:
+                        send_telegram_message(f"📉 {symbol} dotknął EMA100 (z SMA9) ({interval_label})\nEMA100: {round(last_ema100, 4)}")
 
             time.sleep(300)
 
