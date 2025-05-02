@@ -3,6 +3,9 @@ import time
 import threading
 from flask import Flask
 
+# --- Configuration ---
+PROX_THRESHOLD = 0.002  # 0.2% proximity threshold to EMA
+
 # --- Telegram Setup ---
 TELEGRAM_TOKEN = "8136212695:AAH3f0HVU3P0hd7jtPN_u0ggCdTC8Cn1vCg"
 CHAT_ID = "333714345"
@@ -18,104 +21,100 @@ def home():
 
 # --- Bot Functions ---
 def send_telegram_message(message):
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message
-    }
+    payload = {"chat_id": CHAT_ID, "text": message}
     try:
         requests.post(BASE_URL, json=payload, headers=HEADERS)
     except:
         pass
 
+# Fetch symbol list
 def get_futures_symbols():
     try:
         url = "https://api.bybit.com/v5/market/instruments-info?category=linear"
-        response = requests.get(url)
-        data = response.json()
+        resp = requests.get(url)
+        data = resp.json()
         return [s['symbol'] for s in data['result']['list'] if s['symbol'].endswith("USDT")]
     except:
         return []
 
+# Fetch klines: return list of [close, low, high]
 def get_klines(symbol, interval="60", limit=100):
     try:
         url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
-        response = requests.get(url)
-        data = response.json()
-        if response.status_code != 200 or 'result' not in data or 'list' not in data['result']:
+        resp = requests.get(url)
+        data = resp.json()
+        if resp.status_code != 200 or 'result' not in data or 'list' not in data['result']:
             return []
-        # Bybit kline fields: [timestamp, open, high, low, close, volume, ...]
-        return [[float(x[4]), float(x[3]), float(x[2])] for x in data['result']['list']]  # [close, low, high]
+        # fields: [timestamp, open, high, low, close, volume, ...]
+        return [[float(x[4]), float(x[3]), float(x[2])] for x in data['result']['list']]
     except:
         return []
 
-def calculate_ema(data, period):
+# Calculate EMA
+def calculate_ema(arr, period):
     ema = []
     k = 2 / (period + 1)
-    for i in range(len(data)):
-        if data[i] is None:
-            ema.append(None)
-        elif i < period - 1:
+    for i, price in enumerate(arr):
+        if price is None or i < period - 1:
             ema.append(None)
         elif i == period - 1:
-            sma = sum(data[:period]) / period
+            sma = sum(arr[:period]) / period
             ema.append(sma)
         else:
             prev = ema[i-1]
-            ema.append((data[i] - prev) * k + prev)
+            ema.append((price - prev) * k + prev)
     return ema
 
-# Added SMA smoothing for EMA (smoothing_length = 9)
-def calculate_sma(data, period):
+# Calculate SMA
+def calculate_sma(arr, period):
     sma = []
-    for i in range(len(data)):
-        if i < period - 1 or data[i] is None:
+    for i in range(len(arr)):
+        if i < period - 1 or arr[i] is None:
             sma.append(None)
         else:
-            window = [v for v in data[i-period+1:i+1] if v is not None]
-            if len(window) < period:
-                sma.append(None)
-            else:
-                sma.append(sum(window) / period)
+            window = [v for v in arr[i-period+1:i+1] if v is not None]
+            sma.append(sum(window) / period if len(window) == period else None)
     return sma
 
+# Main bot logic
 def ema_bot():
-    send_telegram_message("✅ Bot EMA działa na Render! Monitoruję EMA50 i EMA100 (z SMA9) na 1H i 4H...")
-
+    send_telegram_message("✅ Bot EMA działa! Monitoruję EMA50 i EMA100 na 1H i 4H...")
     while True:
         try:
             symbols = get_futures_symbols()
-            for interval_label, interval_code in [("1H", "60"), ("4H", "240")]:
+            for label, code in [("1H","60"), ("4H","240")]:
                 for symbol in symbols:
-                    klines = get_klines(symbol, interval=interval_code)
+                    klines = get_klines(symbol, interval=code)
                     if len(klines) < 100:
                         continue
-
                     closes = [k[0] for k in klines]
                     low = klines[-1][1]
                     high = klines[-1][2]
+                    last_close = closes[-1]
 
-                    # raw EMA
+                    # Raw and smoothed EMAs
                     ema50_raw = calculate_ema(closes, 50)
                     ema100_raw = calculate_ema(closes, 100)
-                    # SMA smoothing line length 9
                     ema50 = calculate_sma(ema50_raw, 9)
                     ema100 = calculate_sma(ema100_raw, 9)
-
-                    # last values
                     last_ema50 = ema50[-1]
                     last_ema100 = ema100[-1]
 
-                    # check only if values exist
+                    # 1) Touch detection
                     if last_ema50 is not None and low <= last_ema50 <= high:
-                        send_telegram_message(f"📉 {symbol} dotknął EMA50 (z SMA9) ({interval_label})\nEMA50: {round(last_ema50, 4)}")
-
+                        send_telegram_message(f"📉 {symbol} dotknął EMA50 (z SMA9) ({label})\nEMA50: {last_ema50:.4f}")
                     if last_ema100 is not None and low <= last_ema100 <= high:
-                        send_telegram_message(f"📉 {symbol} dotknął EMA100 (z SMA9) ({interval_label})\nEMA100: {round(last_ema100, 4)}")
+                        send_telegram_message(f"📉 {symbol} dotknął EMA100 (z SMA9) ({label})\nEMA100: {last_ema100:.4f}")
+
+                    # 2) Proximity detection
+                    if last_ema50 is not None and abs(last_close - last_ema50)/last_ema50 <= PROX_THRESHOLD:
+                        send_telegram_message(f"🔎 {symbol} blisko EMA50 ({label}): Close={last_close:.4f}, EMA50={last_ema50:.4f}")
+                    if last_ema100 is not None and abs(last_close - last_ema100)/last_ema100 <= PROX_THRESHOLD:
+                        send_telegram_message(f"🔎 {symbol} blisko EMA100 ({label}): Close={last_close:.4f}, EMA100={last_ema100:.4f}")
 
             time.sleep(300)
-
         except Exception as e:
-            send_telegram_message(f"❌ Błąd EMA bota: {str(e)}")
+            send_telegram_message(f"❌ Błąd EMA bota: {e}")
             time.sleep(300)
 
 if __name__ == '__main__':
