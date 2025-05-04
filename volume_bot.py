@@ -6,7 +6,6 @@ from flask import Flask
 
 # --- Configuration ---
 PROX_THRESHOLD = 0.002  # 0.2% proximity threshold to EMA
-TEST_SYMBOLS = ["ETHUSDT"]  # for testing, limit to ETHUSDT; later remove this filter
 
 # --- Telegram Setup ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8136212695:AAH3f0HVU3P0hd7jtPN_u0ggCdTC8Cn1vCg")
@@ -30,33 +29,31 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"[ERROR] Telegram send failed: {e}")
 
-# Fetch symbol list
+# Fetch list of futures symbols
 def get_futures_symbols():
     try:
         url = "https://api.bybit.com/v5/market/instruments-info?category=linear"
         data = requests.get(url).json()
-        symbols = [s['symbol'] for s in data['result']['list'] if s['symbol'].endswith("USDT")]
-        # limit for testing
-        return [sym for sym in symbols if sym in TEST_SYMBOLS]
+        return [s['symbol'] for s in data['result']['list'] if s['symbol'].endswith("USDT")]
     except Exception as e:
         print(f"[ERROR] Fetching symbols failed: {e}")
         return []
 
-# Fetch klines: return list of [close, low, high]
-def get_klines(symbol, interval="1", limit=100):
+# Fetch klines for symbol: return list of [close, low, high]
+def get_klines(symbol, interval="60", limit=100):
     try:
         url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
         resp = requests.get(url)
         data = resp.json()
         if resp.status_code != 200 or 'result' not in data or 'list' not in data['result']:
             return []
-        # Kline: [timestamp, open, high, low, close, volume,...]
+        # Kline array: [timestamp, open, high, low, close, volume, ...]
         return [[float(x[4]), float(x[3]), float(x[2])] for x in data['result']['list']]
     except Exception as e:
         print(f"[ERROR] Fetching klines for {symbol} failed: {e}")
         return []
 
-# EMA calculation
+# Calculate EMA
 def calculate_ema(arr, period):
     ema = []
     k = 2 / (period + 1)
@@ -69,7 +66,7 @@ def calculate_ema(arr, period):
             ema.append((price - ema[i-1]) * k + ema[i-1])
     return ema
 
-# SMA calculation
+# Calculate SMA
 def calculate_sma(arr, period):
     sma = []
     for i in range(len(arr)):
@@ -80,46 +77,59 @@ def calculate_sma(arr, period):
             sma.append(sum(window) / period if len(window) == period else None)
     return sma
 
-# Scanning logic
+# Main EMA scanning logic
 def ema_bot():
-    send_telegram_message("✅ Bot EMA działa! TEST 1m, limit ETHUSDT")
+    send_telegram_message("✅ Bot EMA działa! Monitoruję EMA50 i EMA100 na 1H i 4H...")
     while True:
         print("[DEBUG] Starting scan cycle")
         symbols = get_futures_symbols()
-        for label, code in [("1m", "1")]:
+        for label, code in [("1H", "60"), ("4H", "240")]:
             for symbol in symbols:
-                print(f"[DEBUG] Scanning {symbol} on {label}")
                 klines = get_klines(symbol, interval=code)
                 if len(klines) < 100:
-                    print(f"[DEBUG] Not enough klines for {symbol}: {len(klines)}")
                     continue
                 closes = [k[0] for k in klines]
                 low = klines[-1][1]
                 high = klines[-1][2]
                 last_close = closes[-1]
-                prev_close = closes[-2]
-                
+                prev_close = closes[-2] if len(closes) >= 2 else None
+
                 ema50_raw = calculate_ema(closes, 50)
                 ema100_raw = calculate_ema(closes, 100)
                 ema50 = calculate_sma(ema50_raw, 9)
                 ema100 = calculate_sma(ema100_raw, 9)
                 last_ema50 = ema50[-1]
                 last_ema100 = ema100[-1]
-                prev_ema50 = ema50[-2]
-                print(f"[DEBUG] {symbol} {label}: prev_close={prev_close}, last_close={last_close}, prev_ema50={prev_ema50}, last_ema50={last_ema50}, low={low}, high={high}")
+                print(f"[DEBUG] {symbol} {label}: last_close={last_close}, last_ema50={last_ema50}, last_ema100={last_ema100}, low={low}, high={high}")
 
-                # Touch detection
+                # Touch alerts
                 if last_ema50 is not None and low <= last_ema50 <= high:
-                    send_telegram_message(f"📉 {symbol} dotknął EMA50 {label}\nEMA50: {last_ema50:.4f}")
+                    send_telegram_message(f"📉 {symbol} dotknął EMA50 ({label})\nEMA50: {last_ema50:.4f}")
+                if last_ema100 is not None and low <= last_ema100 <= high:
+                    send_telegram_message(f"📉 {symbol} dotknął EMA100 ({label})\nEMA100: {last_ema100:.4f}")
 
-        time.sleep(60)
+                # Proximity alerts
+                if last_ema50 is not None and abs(last_close - last_ema50)/last_ema50 <= PROX_THRESHOLD:
+                    send_telegram_message(f"🔎 {symbol} blisko EMA50 ({label}): Close={last_close:.4f}, EMA50={last_ema50:.4f}")
+                if last_ema100 is not None and abs(last_close - last_ema100)/last_ema100 <= PROX_THRESHOLD:
+                    send_telegram_message(f"🔎 {symbol} blisko EMA100 ({label}): Close={last_close:.4f}, EMA100={last_ema100:.4f}")
+        time.sleep(300)
 
-# Run
+# Self-ping to keep free dyno alive
+def self_ping(port):
+    while True:
+        try:
+            requests.get(f"http://127.0.0.1:{port}/")
+            print(f"[DEBUG] Self-ping sent to port {port}")
+        except Exception as e:
+            print(f"[ERROR] Self-ping failed: {e}")
+        time.sleep(240)
+
 if __name__ == '__main__':
+    port = int(os.environ.get("PORT", "10000"))
     # Start Flask for keep-alive
-    def run_flask():
-        port = int(os.environ.get("PORT", "10000"))
-        app.run(host='0.0.0.0', port=port)
-    threading.Thread(target=run_flask, daemon=True).start()
-    # Run scanning in main thread
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True).start()
+    # Start self-ping thread
+    threading.Thread(target=self_ping, args=(port,), daemon=True).start()
+    # Run EMA bot logic
     ema_bot()
