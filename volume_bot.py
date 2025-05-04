@@ -29,29 +29,59 @@ def send_telegram_message(message):
     except Exception as e:
         print(f"[ERROR] Telegram send failed: {e}", flush=True)
 
-# Fetch list of futures symbols
+# Fetch list of futures symbols with robust error handling
 def get_futures_symbols():
+    url = "https://api.bybit.com/v5/market/instruments-info?category=linear"
     try:
-        url = "https://api.bybit.com/v5/market/instruments-info?category=linear"
-        data = requests.get(url).json()
-        return [s['symbol'] for s in data['result']['list'] if s['symbol'].endswith("USDT")]
+        resp = requests.get(url, timeout=10)
     except Exception as e:
-        print(f"[ERROR] Fetching symbols failed: {e}", flush=True)
+        print(f"[ERROR] Request to fetch symbols failed: {e}", flush=True)
         return []
-
-# Fetch klines for symbol: return list of [close, low, high]
-def get_klines(symbol, interval="60", limit=100):
+    if resp.status_code != 200:
+        print(f"[ERROR] Fetching symbols returned status {resp.status_code}: {resp.text}", flush=True)
+        return []
     try:
-        url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
-        resp = requests.get(url)
         data = resp.json()
-        if resp.status_code != 200 or 'result' not in data or 'list' not in data['result']:
-            return []
-        # Kline array: [timestamp, open, high, low, close, volume, ...]
-        return [[float(x[4]), float(x[3]), float(x[2])] for x in data['result']['list']]
-    except Exception as e:
-        print(f"[ERROR] Fetching klines for {symbol} failed: {e}", flush=True)
+    except ValueError as e:
+        print(f"[ERROR] Parsing symbols JSON failed: {e}, raw response: {resp.text}", flush=True)
         return []
+    result = []
+    try:
+        for s in data['result']['list']:
+            sym = s.get('symbol')
+            if sym and sym.endswith('USDT'):
+                result.append(sym)
+    except Exception as e:
+        print(f"[ERROR] Unexpected data format fetching symbols: {e}, data: {data}", flush=True)
+    return result
+
+# Fetch klines for symbol: return list of [close, low, high] with error logging
+def get_klines(symbol, interval="60", limit=100):
+    url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
+    try:
+        resp = requests.get(url, timeout=10)
+    except Exception as e:
+        print(f"[ERROR] Request for klines {symbol} failed: {e}", flush=True)
+        return []
+    if resp.status_code != 200:
+        print(f"[ERROR] Fetching klines {symbol} returned status {resp.status_code}: {resp.text}", flush=True)
+        return []
+    try:
+        data = resp.json()
+    except ValueError as e:
+        print(f"[ERROR] Parsing klines JSON for {symbol} failed: {e}, raw response: {resp.text}", flush=True)
+        return []
+    if 'result' not in data or 'list' not in data['result']:
+        print(f"[DEBUG] No kline data for {symbol}: {data}", flush=True)
+        return []
+    klines = []
+    for x in data['result']['list']:
+        try:
+            close = float(x[4]); low = float(x[3]); high = float(x[2])
+            klines.append([close, low, high])
+        except Exception:
+            continue
+    return klines
 
 # Calculate EMA
 def calculate_ema(arr, period):
@@ -77,41 +107,39 @@ def calculate_sma(arr, period):
             sma.append(sum(window) / period if len(window) == period else None)
     return sma
 
-# Self-ping thread
-
+# Self-ping thread to keep dyno alive
 def self_ping(port):
     while True:
         try:
-            requests.get(f"http://127.0.0.1:{port}/")
+            requests.get(f"http://127.0.0.1:{port}/", timeout=5)
             print(f"[DEBUG] Self-ping sent to port {port}", flush=True)
         except Exception as e:
             print(f"[ERROR] Self-ping failed: {e}", flush=True)
         time.sleep(240)
 
-# Main EMA scanning logic
+# Main scanning logic
 def ema_bot():
     print("[DEBUG] Bot start", flush=True)
     send_telegram_message("✅ Bot EMA działa! Monitoruję EMA50 i EMA100 na 1H i 4H...")
     while True:
         print("[DEBUG] Starting scan cycle", flush=True)
         symbols = get_futures_symbols()
+        if not symbols:
+            print("[DEBUG] No symbols fetched, skipping cycle", flush=True)
         for label, code in [("1H", "60"), ("4H", "240")]:
             for symbol in symbols:
                 klines = get_klines(symbol, interval=code)
                 if len(klines) < 100:
-                    print(f"[DEBUG] Not enough klines for {symbol} ({label}): {len(klines)}", flush=True)
                     continue
                 closes = [k[0] for k in klines]
-                low = klines[-1][1]
-                high = klines[-1][2]
+                low, high = klines[-1][1], klines[-1][2]
                 last_close = closes[-1]
 
                 ema50_raw = calculate_ema(closes, 50)
                 ema100_raw = calculate_ema(closes, 100)
                 ema50 = calculate_sma(ema50_raw, 9)
                 ema100 = calculate_sma(ema100_raw, 9)
-                last_ema50 = ema50[-1]
-                last_ema100 = ema100[-1]
+                last_ema50, last_ema100 = ema50[-1], ema100[-1]
                 print(f"[DEBUG] {symbol} {label}: close={last_close}, EMA50={last_ema50}, EMA100={last_ema100}, low={low}, high={high}", flush=True)
 
                 # Touch alerts
@@ -130,9 +158,6 @@ def ema_bot():
 # Entry point
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", "10000"))
-    # Run flask in background
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True).start()
-    # Run self-ping
     threading.Thread(target=self_ping, args=(port,), daemon=True).start()
-    # Run EMA bot
     ema_bot()
