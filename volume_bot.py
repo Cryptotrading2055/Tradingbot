@@ -22,12 +22,12 @@ def home():
 
 # --- Bot Functions ---
 def send_telegram_message(message):
-    print(f"[DEBUG] Sending Telegram message: {message}")
+    print(f"[DEBUG] Sending Telegram message: {message}", flush=True)
     payload = {"chat_id": CHAT_ID, "text": message}
     try:
         requests.post(BASE_URL, json=payload, headers=HEADERS)
     except Exception as e:
-        print(f"[ERROR] Telegram send failed: {e}")
+        print(f"[ERROR] Telegram send failed: {e}", flush=True)
 
 # Fetch list of futures symbols
 def get_futures_symbols():
@@ -36,7 +36,7 @@ def get_futures_symbols():
         data = requests.get(url).json()
         return [s['symbol'] for s in data['result']['list'] if s['symbol'].endswith("USDT")]
     except Exception as e:
-        print(f"[ERROR] Fetching symbols failed: {e}")
+        print(f"[ERROR] Fetching symbols failed: {e}", flush=True)
         return []
 
 # Fetch klines for symbol: return list of [close, low, high]
@@ -50,7 +50,7 @@ def get_klines(symbol, interval="60", limit=100):
         # Kline array: [timestamp, open, high, low, close, volume, ...]
         return [[float(x[4]), float(x[3]), float(x[2])] for x in data['result']['list']]
     except Exception as e:
-        print(f"[ERROR] Fetching klines for {symbol} failed: {e}")
+        print(f"[ERROR] Fetching klines for {symbol} failed: {e}", flush=True)
         return []
 
 # Calculate EMA
@@ -77,22 +77,34 @@ def calculate_sma(arr, period):
             sma.append(sum(window) / period if len(window) == period else None)
     return sma
 
+# Self-ping thread
+
+def self_ping(port):
+    while True:
+        try:
+            requests.get(f"http://127.0.0.1:{port}/")
+            print(f"[DEBUG] Self-ping sent to port {port}", flush=True)
+        except Exception as e:
+            print(f"[ERROR] Self-ping failed: {e}", flush=True)
+        time.sleep(240)
+
 # Main EMA scanning logic
 def ema_bot():
+    print("[DEBUG] Bot start", flush=True)
     send_telegram_message("✅ Bot EMA działa! Monitoruję EMA50 i EMA100 na 1H i 4H...")
     while True:
-        print("[DEBUG] Starting scan cycle")
+        print("[DEBUG] Starting scan cycle", flush=True)
         symbols = get_futures_symbols()
         for label, code in [("1H", "60"), ("4H", "240")]:
             for symbol in symbols:
                 klines = get_klines(symbol, interval=code)
                 if len(klines) < 100:
+                    print(f"[DEBUG] Not enough klines for {symbol} ({label}): {len(klines)}", flush=True)
                     continue
                 closes = [k[0] for k in klines]
                 low = klines[-1][1]
                 high = klines[-1][2]
                 last_close = closes[-1]
-                prev_close = closes[-2] if len(closes) >= 2 else None
 
                 ema50_raw = calculate_ema(closes, 50)
                 ema100_raw = calculate_ema(closes, 100)
@@ -100,7 +112,7 @@ def ema_bot():
                 ema100 = calculate_sma(ema100_raw, 9)
                 last_ema50 = ema50[-1]
                 last_ema100 = ema100[-1]
-                print(f"[DEBUG] {symbol} {label}: last_close={last_close}, last_ema50={last_ema50}, last_ema100={last_ema100}, low={low}, high={high}")
+                print(f"[DEBUG] {symbol} {label}: close={last_close}, EMA50={last_ema50}, EMA100={last_ema100}, low={low}, high={high}", flush=True)
 
                 # Touch alerts
                 if last_ema50 is not None and low <= last_ema50 <= high:
@@ -115,21 +127,12 @@ def ema_bot():
                     send_telegram_message(f"🔎 {symbol} blisko EMA100 ({label}): Close={last_close:.4f}, EMA100={last_ema100:.4f}")
         time.sleep(300)
 
-# Self-ping to keep free dyno alive
-def self_ping(port):
-    while True:
-        try:
-            requests.get(f"http://127.0.0.1:{port}/")
-            print(f"[DEBUG] Self-ping sent to port {port}")
-        except Exception as e:
-            print(f"[ERROR] Self-ping failed: {e}")
-        time.sleep(240)
-
+# Entry point
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", "10000"))
-    # Start Flask for keep-alive
+    # Run flask in background
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True).start()
-    # Start self-ping thread
+    # Run self-ping
     threading.Thread(target=self_ping, args=(port,), daemon=True).start()
-    # Run EMA bot logic
+    # Run EMA bot
     ema_bot()
