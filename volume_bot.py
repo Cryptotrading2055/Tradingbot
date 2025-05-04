@@ -40,13 +40,14 @@ def get_futures_symbols():
         return []
 
 # Fetch klines: [close, low, high]
-def get_klines(symbol, interval="60", limit=100):
+def get_klines(symbol, interval="1", limit=100):
     try:
         url = f"https://api.bybit.com/v5/market/kline?category=linear&symbol={symbol}&interval={interval}&limit={limit}"
         resp = requests.get(url)
         data = resp.json()
         if resp.status_code != 200 or 'result' not in data or 'list' not in data['result']:
             return []
+        # Kline format: [timestamp, open, high, low, close, volume, ...]
         return [[float(x[4]), float(x[3]), float(x[2])] for x in data['result']['list']]
     except Exception as e:
         print(f"[ERROR] Fetching klines for {symbol} failed: {e}")
@@ -78,10 +79,11 @@ def calculate_sma(arr, period):
 
 # Main bot logic
 def ema_bot():
-    send_telegram_message("✅ Bot EMA działa! Monitoruję EMA50 i EMA100 na 1H i 4H...")
+    send_telegram_message("✅ Bot EMA działa! Test 1m: Monitoruję EMA50 i EMA100 na 1-minutowych świecach...")
     while True:
         symbols = get_futures_symbols()
-        for label, code in [("1H","60"), ("4H","240")]:
+        # Test tylko interwału 1m
+        for label, code in [("1m","1")]:
             for symbol in symbols:
                 klines = get_klines(symbol, interval=code)
                 if len(klines) < 100:
@@ -103,40 +105,27 @@ def ema_bot():
                 prev_ema100 = ema100[-2] if len(ema100) >= 2 else None
 
                 # Debug logging
-                print(f"[DEBUG] {symbol} {label}: prev_close={prev_close}, last_close={last_close}, prev_ema50={prev_ema50}, last_ema50={last_ema50}, prev_ema100={prev_ema100}, last_ema100={last_ema100}, low={low}, high={high}")
+                print(f"[DEBUG] {symbol} {label}: prev_close={prev_close}, last_close={last_close}, prev_ema50={prev_ema50}, last_ema50={last_ema50}, low={low}, high={high}")
 
                 # Touch detection
                 if last_ema50 is not None and low <= last_ema50 <= high:
-                    msg = f"📉 {symbol} dotknął EMA50 (z SMA9) ({label})\nEMA50: {last_ema50:.4f}"
-                    send_telegram_message(msg)
+                    send_telegram_message(f"📉 {symbol} dotknął EMA50 (z SMA9) ({label})\nEMA50: {last_ema50:.4f}")
                 if last_ema100 is not None and low <= last_ema100 <= high:
-                    msg = f"📉 {symbol} dotknął EMA100 (z SMA9) ({label})\nEMA100: {last_ema100:.4f}"
-                    send_telegram_message(msg)
+                    send_telegram_message(f"📉 {symbol} dotknął EMA100 (z SMA9) ({label})\nEMA100: {last_ema100:.4f}")
 
                 # Cross detection
                 if prev_ema50 is not None and prev_close is not None and last_close is not None:
                     if prev_close < prev_ema50 <= last_close:
-                        msg = f"🚀 {symbol} przecięcie EMA50 wzrostowo ({label})\nClose: {last_close:.4f}, EMA50: {last_ema50:.4f}"
-                        send_telegram_message(msg)
+                        send_telegram_message(f"🚀 {symbol} przecięcie EMA50 wzrostowo ({label})\nClose: {last_close:.4f}, EMA50: {last_ema50:.4f}")
                     if prev_close > prev_ema50 >= last_close:
-                        msg = f"🔻 {symbol} przecięcie EMA50 spadkowo ({label})\nClose: {last_close:.4f}, EMA50: {last_ema50:.4f}"
-                        send_telegram_message(msg)
-                if prev_ema100 is not None and prev_close is not None and last_close is not None:
-                    if prev_close < prev_ema100 <= last_close:
-                        msg = f"🚀 {symbol} przecięcie EMA100 wzrostowo ({label})\nClose: {last_close:.4f}, EMA100: {last_ema100:.4f}"
-                        send_telegram_message(msg)
-                    if prev_close > prev_ema100 >= last_close:
-                        msg = f"🔻 {symbol} przecięcie EMA100 spadkowo ({label})\nClose: {last_close:.4f}, EMA100: {last_ema100:.4f}"
-                        send_telegram_message(msg)
+                        send_telegram_message(f"🔻 {symbol} przecięcie EMA50 spadkowo ({label})\nClose: {last_close:.4f}, EMA50: {last_ema50:.4f}")
 
                 # Proximity detection
                 if last_ema50 is not None and abs(last_close - last_ema50)/last_ema50 <= PROX_THRESHOLD:
-                    msg = f"🔎 {symbol} blisko EMA50 ({label}): Close={last_close:.4f}, EMA50={last_ema50:.4f}"
-                    send_telegram_message(msg)
+                    send_telegram_message(f"🔎 {symbol} blisko EMA50 ({label}): Close={last_close:.4f}, EMA50={last_ema50:.4f}")
                 if last_ema100 is not None and abs(last_close - last_ema100)/last_ema100 <= PROX_THRESHOLD:
-                    msg = f"🔎 {symbol} blisko EMA100 ({label}): Close={last_close:.4f}, EMA100={last_ema100:.4f}"
-                    send_telegram_message(msg)
-        time.sleep(300)
+                    send_telegram_message(f"🔎 {symbol} blisko EMA100 ({label}): Close={last_close:.4f}, EMA100={last_ema100:.4f}")
+        time.sleep(60)
 
 if __name__ == '__main__':
     threading.Thread(target=ema_bot, daemon=True).start()
