@@ -13,7 +13,7 @@ CHAT_ID = os.getenv("CHAT_ID", "333714345")
 BASE_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 HEADERS = {'Content-Type': 'application/json'}
 
-# --- Flask App (for keep-alive on Render Free Web Service) ---
+# --- Flask App (for keep-alive on Render) ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -49,7 +49,7 @@ def get_klines(symbol, interval="60", limit=100):
     except:
         return []
 
-# EMA helper
+# Calculate EMA
 def calculate_ema(arr, period):
     ema = []
     k = 2 / (period + 1)
@@ -62,7 +62,7 @@ def calculate_ema(arr, period):
             ema.append((price - ema[i-1]) * k + ema[i-1])
     return ema
 
-# SMA helper
+# Calculate SMA
 def calculate_sma(arr, period):
     sma = []
     for i in range(len(arr)):
@@ -83,25 +83,43 @@ def ema_bot():
                 klines = get_klines(symbol, interval=code)
                 if len(klines) < 100:
                     continue
+
                 closes = [k[0] for k in klines]
                 low = klines[-1][1]
                 high = klines[-1][2]
                 last_close = closes[-1]
 
+                # Calculate raw and smoothed EMAs
                 ema50_raw = calculate_ema(closes, 50)
                 ema100_raw = calculate_ema(closes, 100)
                 ema50 = calculate_sma(ema50_raw, 9)
                 ema100 = calculate_sma(ema100_raw, 9)
+
+                prev_ema50 = ema50[-2] if len(ema50) >= 2 else None
+                prev_ema100 = ema100[-2] if len(ema100) >= 2 else None
                 last_ema50 = ema50[-1]
                 last_ema100 = ema100[-1]
+                prev_close = closes[-2] if len(closes) >= 2 else None
 
-                # Touch alerts
+                # Touch detection
                 if last_ema50 is not None and low <= last_ema50 <= high:
                     send_telegram_message(f"📉 {symbol} dotknął EMA50 (z SMA9) ({label})\nEMA50: {last_ema50:.4f}")
                 if last_ema100 is not None and low <= last_ema100 <= high:
                     send_telegram_message(f"📉 {symbol} dotknął EMA100 (z SMA9) ({label})\nEMA100: {last_ema100:.4f}")
 
-                # Proximity alerts
+                # Cross detection
+                if prev_ema50 is not None and prev_close is not None and last_close is not None:
+                    if prev_close < prev_ema50 and last_close >= last_ema50:
+                        send_telegram_message(f"🚀 {symbol} przecięcie EMA50 wzrostowo ({label})\nClose: {last_close:.4f}, EMA50: {last_ema50:.4f}")
+                    if prev_close > prev_ema50 and last_close <= last_ema50:
+                        send_telegram_message(f"🔻 {symbol} przecięcie EMA50 spadkowo ({label})\nClose: {last_close:.4f}, EMA50: {last_ema50:.4f}")
+                if prev_ema100 is not None and prev_close is not None and last_close is not None:
+                    if prev_close < prev_ema100 and last_close >= last_ema100:
+                        send_telegram_message(f"🚀 {symbol} przecięcie EMA100 wzrostowo ({label})\nClose: {last_close:.4f}, EMA100: {last_ema100:.4f}")
+                    if prev_close > prev_ema100 and last_close <= last_ema100:
+                        send_telegram_message(f"🔻 {symbol} przecięcie EMA100 spadkowo ({label})\nClose: {last_close:.4f}, EMA100: {round(last_ema100,4)}")
+
+                # Proximity detection
                 if last_ema50 is not None and abs(last_close - last_ema50)/last_ema50 <= PROX_THRESHOLD:
                     send_telegram_message(f"🔎 {symbol} blisko EMA50 ({label}): Close={last_close:.4f}, EMA50={last_ema50:.4f}")
                 if last_ema100 is not None and abs(last_close - last_ema100)/last_ema100 <= PROX_THRESHOLD:
@@ -109,8 +127,6 @@ def ema_bot():
         time.sleep(300)
 
 if __name__ == '__main__':
-    # start background scanning thread
     threading.Thread(target=ema_bot, daemon=True).start()
-    # bind Flask to the port provided by Render
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", "10000"))
     app.run(host='0.0.0.0', port=port)
